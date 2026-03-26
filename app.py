@@ -15,7 +15,7 @@ _default_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'f1bets.d
 DB_PATH     = os.environ.get('DB_PATH', _default_db)
 PUBLIC_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public')
 ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', 'f1bets2025')
-F1_API_BASE = 'https://api.jolpica.com/ergast/f1'
+F1_API_BASE = 'https://api.jolpi.ca/ergast/f1'
 
 app = Flask(__name__, static_folder=PUBLIC_DIR)
 
@@ -86,9 +86,9 @@ CALENDAR_2026 = [
         ('race',    '2026-03-15T04:00:00Z', 1),
     ]),
     (2,  'Chinese GP',       'Shanghai',    True,  [
-        ('sprint',  '2026-03-28T03:00:00Z', 0),
-        ('qualify', '2026-03-28T07:00:00Z', 0),
-        ('race',    '2026-03-29T07:00:00Z', 0),
+        ('sprint',  '2026-03-14T03:00:00Z', 1),
+        ('qualify', '2026-03-14T07:00:00Z', 1),
+        ('race',    '2026-03-15T07:00:00Z', 1),
     ]),
     (3,  'Japanese GP',      'Suzuka',      False, [
         ('qualify', '2026-04-04T06:00:00Z', 0),
