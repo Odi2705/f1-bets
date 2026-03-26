@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: f1-bets
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 app:app
+    disk:
+      name: f1bets-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /data/f1bets.db
+      - key: ADMIN_TOKEN
+        generateValue: true
