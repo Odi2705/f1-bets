@@ -295,6 +295,39 @@ def fetch_sprint(season, round_num):
     return [{'position': int(r['position']), 'driver': r['Driver']['familyName']}
             for r in races[0]['SprintResults'][:3]]
 
+def fetch_fastf1(event_type, season, round_num):
+    """Fallback: fetch results via FastF1 library (uses official F1 timing data)."""
+    try:
+        import fastf1
+        import os
+        os.makedirs('/tmp/ff1_cache', exist_ok=True)
+        fastf1.Cache.enable_cache('/tmp/ff1_cache')
+
+        type_map = {'qualify': 'Q', 'race': 'R', 'sprint': 'Sprint'}
+        ff1_type = type_map.get(event_type)
+        if not ff1_type:
+            return None
+
+        session = fastf1.get_session(season, round_num, ff1_type)
+        session.load(laps=False, telemetry=False, weather=False, messages=False)
+
+        results = session.results
+        if results is None or results.empty:
+            return None
+
+        limit = 10 if event_type == 'race' else 3
+        sorted_res = results.sort_values('Position').head(limit)
+        out = []
+        for _, row in sorted_res.iterrows():
+            pos = row.get('Position')
+            name = row.get('LastName', '')
+            if pos and str(pos) not in ('nan', 'None', '') and name:
+                out.append({'position': int(pos), 'driver': str(name)})
+        return out if out else None
+    except Exception as e:
+        print(f'FastF1 fallback error: {e}')
+        return None
+
 # ─── Helper to convert Row to dict ───────────────────────────────────────────
 
 def row2dict(row):
@@ -572,8 +605,10 @@ def admin_fetch_results(event_id):
             results = fetch_sprint(event['season'], event['round'])
 
         if not results:
+            results = fetch_fastf1(event['type'], event['season'], event['round'])
+        if not results:
             conn.close()
-            return jsonify({'error': 'Resultados não encontrados na API F1'}), 404
+            return jsonify({'error': 'Resultados não encontrados na API F1 nem no FastF1'}), 404
 
         for r in results:
             conn.execute(
