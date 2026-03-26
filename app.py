@@ -1,75 +1,103 @@
 #!/usr/bin/env python3
-"""F1 Bets 2026 — Flask backend"""
+"""F1 Bets 2026 — Flask backend (PostgreSQL)"""
 
 import os
-import sqlite3
 import json
 import urllib.request
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory, send_file
+import psycopg2
+import psycopg2.extras
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-# DB_PATH can be overridden via env var — used by cloud deployments with persistent disk
-_default_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'f1bets.db')
-DB_PATH     = os.environ.get('DB_PATH', _default_db)
-PUBLIC_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public')
-ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', 'f1bets2025')
-F1_API_BASE = 'https://api.jolpi.ca/ergast/f1'
+DATABASE_URL = os.environ.get('DATABASE_URL')
+PUBLIC_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public')
+ADMIN_TOKEN  = os.environ.get('ADMIN_TOKEN', 'f1bets2026')
+F1_API_BASE  = 'https://api.jolpi.ca/ergast/f1'
 
 app = Flask(__name__, static_folder=PUBLIC_DIR)
 
-# ─── Database ─────────────────────────────────────────────────────────────────
+# ─── Database wrapper ─────────────────────────────────────────────────────────
+
+class _Cur:
+    """Wraps a psycopg2 cursor so callers can chain .fetchone()/.fetchall()."""
+    def __init__(self, cur):
+        self._c = cur
+    def fetchone(self):
+        return self._c.fetchone()
+    def fetchall(self):
+        return self._c.fetchall() or []
+
+class DBConn:
+    def __init__(self):
+        self._conn = psycopg2.connect(
+            DATABASE_URL,
+            cursor_factory=psycopg2.extras.RealDictCursor
+        )
+
+    def execute(self, sql, params=None):
+        sql = sql.replace('?', '%s')
+        cur = self._conn.cursor()
+        cur.execute(sql, params or ())
+        return _Cur(cur)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA foreign_keys=ON')
-    return conn
+    return DBConn()
+
+# ─── Init DB ──────────────────────────────────────────────────────────────────
 
 def init_db():
     conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS participants (
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS participants (
+            id   SERIAL PRIMARY KEY,
             name TEXT NOT NULL UNIQUE
-        );
-        CREATE TABLE IF NOT EXISTS race_weekends (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS race_weekends (
+            id         SERIAL PRIMARY KEY,
             name       TEXT NOT NULL,
             location   TEXT,
             season     INTEGER NOT NULL DEFAULT 2026,
             round      INTEGER NOT NULL,
             has_sprint INTEGER NOT NULL DEFAULT 0,
             UNIQUE(season, round)
-        );
-        CREATE TABLE IF NOT EXISTS events (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS events (
+            id              SERIAL PRIMARY KEY,
             weekend_id      INTEGER NOT NULL REFERENCES race_weekends(id),
             type            TEXT NOT NULL CHECK(type IN ('qualify','sprint','race')),
             deadline        TEXT NOT NULL,
             completed       INTEGER NOT NULL DEFAULT 0,
             allow_late_bets INTEGER NOT NULL DEFAULT 0,
             UNIQUE(weekend_id, type)
-        );
-        CREATE TABLE IF NOT EXISTS bets (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS bets (
+            id             SERIAL PRIMARY KEY,
             participant_id INTEGER NOT NULL REFERENCES participants(id),
             event_id       INTEGER NOT NULL REFERENCES events(id),
             position       INTEGER NOT NULL,
             driver         TEXT NOT NULL,
-            created_at     TEXT DEFAULT (datetime('now')),
+            created_at     TIMESTAMP DEFAULT NOW(),
             UNIQUE(participant_id, event_id, position)
-        );
-        CREATE TABLE IF NOT EXISTS results (
-            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS results (
+            id       SERIAL PRIMARY KEY,
             event_id INTEGER NOT NULL REFERENCES events(id),
             position INTEGER NOT NULL,
             driver   TEXT NOT NULL,
             UNIQUE(event_id, position)
-        );
-    """)
+        )""",
+    ]
+    for stmt in stmts:
+        conn.execute(stmt)
+    conn.commit()
     seed_participants(conn)
     seed_calendar(conn)
     seed_australian_results(conn)
@@ -78,7 +106,10 @@ def init_db():
 
 def seed_participants(conn):
     for name in ['Odair', 'Adriano', 'Fátima', 'Renato', 'Ximenes', 'Lucas']:
-        conn.execute('INSERT OR IGNORE INTO participants (name) VALUES (?)', (name,))
+        conn.execute(
+            'INSERT INTO participants (name) VALUES (?) ON CONFLICT DO NOTHING',
+            (name,)
+        )
 
 CALENDAR_2026 = [
     (1,  'Australian GP',    'Melbourne',   False, [
@@ -188,17 +219,17 @@ CALENDAR_2026 = [
 def seed_calendar(conn):
     for (rnd, name, loc, sprint, evts) in CALENDAR_2026:
         conn.execute(
-            'INSERT OR IGNORE INTO race_weekends (name,location,season,round,has_sprint) VALUES (?,?,2026,?,?)',
+            'INSERT INTO race_weekends (name,location,season,round,has_sprint) VALUES (?,?,2026,?,?) ON CONFLICT DO NOTHING',
             (name, loc, rnd, 1 if sprint else 0)
         )
         for (etype, deadline, late) in evts:
             conn.execute("""
-                INSERT OR IGNORE INTO events (weekend_id, type, deadline, allow_late_bets)
+                INSERT INTO events (weekend_id, type, deadline, allow_late_bets)
                 SELECT id, ?, ?, ? FROM race_weekends WHERE season=2026 AND round=?
+                ON CONFLICT DO NOTHING
             """, (etype, deadline, late, rnd))
 
 def seed_australian_results(conn):
-    # Get qualifying event id
     qual = conn.execute("""
         SELECT e.id FROM events e
         JOIN race_weekends w ON w.id = e.weekend_id
@@ -213,16 +244,20 @@ def seed_australian_results(conn):
     if qual:
         conn.execute('UPDATE events SET completed=1 WHERE id=?', (qual['id'],))
         for pos, driver in enumerate(['Russell','Antonelli','Hadjar'], 1):
-            conn.execute('INSERT OR IGNORE INTO results (event_id,position,driver) VALUES (?,?,?)',
-                         (qual['id'], pos, driver))
+            conn.execute(
+                'INSERT INTO results (event_id,position,driver) VALUES (?,?,?) ON CONFLICT DO NOTHING',
+                (qual['id'], pos, driver)
+            )
     if race:
         conn.execute('UPDATE events SET completed=1 WHERE id=?', (race['id'],))
         for pos, driver in enumerate([
             'Russell','Antonelli','Leclerc','Hamilton','Norris',
             'Verstappen','Bearman','Lindblad','Bortoleto','Gasly'
         ], 1):
-            conn.execute('INSERT OR IGNORE INTO results (event_id,position,driver) VALUES (?,?,?)',
-                         (race['id'], pos, driver))
+            conn.execute(
+                'INSERT INTO results (event_id,position,driver) VALUES (?,?,?) ON CONFLICT DO NOTHING',
+                (race['id'], pos, driver)
+            )
 
 # ─── Auth helper ──────────────────────────────────────────────────────────────
 
@@ -397,7 +432,7 @@ def submit_bets():
             INSERT INTO bets (participant_id, event_id, position, driver)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(participant_id, event_id, position)
-            DO UPDATE SET driver=excluded.driver
+            DO UPDATE SET driver=EXCLUDED.driver
         """, (participant_id, event_id, b['position'], b['driver']))
     conn.commit()
     conn.close()
@@ -542,7 +577,7 @@ def admin_fetch_results(event_id):
 
         for r in results:
             conn.execute(
-                'INSERT OR REPLACE INTO results (event_id,position,driver) VALUES (?,?,?)',
+                'INSERT INTO results (event_id,position,driver) VALUES (?,?,?) ON CONFLICT (event_id,position) DO UPDATE SET driver=EXCLUDED.driver',
                 (event_id, r['position'], r['driver'])
             )
         conn.execute('UPDATE events SET completed=1 WHERE id=?', (event_id,))
@@ -564,7 +599,7 @@ def admin_set_results(event_id):
     conn = get_db()
     for r in results:
         conn.execute(
-            'INSERT OR REPLACE INTO results (event_id,position,driver) VALUES (?,?,?)',
+            'INSERT INTO results (event_id,position,driver) VALUES (?,?,?) ON CONFLICT (event_id,position) DO UPDATE SET driver=EXCLUDED.driver',
             (event_id, r['position'], r['driver'])
         )
     conn.execute('UPDATE events SET completed=1 WHERE id=?', (event_id,))
@@ -607,5 +642,4 @@ init_db()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
-    print(f'\n🏎️  F1 Bets app running at http://localhost:{port}\n')
     app.run(host='0.0.0.0', port=port, debug=False)
