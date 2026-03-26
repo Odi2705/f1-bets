@@ -602,8 +602,10 @@ def admin_uncomplete(event_id):
 
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
+# Initialize DB at module level so gunicorn workers also run it
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     port = int(os.environ.get('PORT', 3000))
     print(f'\n🏎️  F1 Bets app running at http://localhost:{port}\n')
     app.run(host='0.0.0.0', port=port, debug=False)
